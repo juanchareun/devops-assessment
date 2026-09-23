@@ -223,9 +223,23 @@ jobs:
 
       - name: Verify deployment
         run: |
-          sleep 5
+          echo "Waiting for application to become ready..."
 
-          curl --fail http://localhost:8080/health
+          for i in {1..12}; do
+            if curl --fail --silent http://localhost:8080/health > /dev/null; then
+              echo "Application is healthy"
+              break
+            fi
+
+            if [ "$i" -eq 12 ]; then
+              echo "Application did not become ready"
+              docker ps -a
+              docker logs devops-api
+              exit 1
+            fi
+
+            sleep 5
+          done
 
           VERSION_RESPONSE=$(curl --fail --silent http://localhost:8080/version)
 
