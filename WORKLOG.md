@@ -26,7 +26,7 @@ Verified `/version` both without `APP_VERSION` and with `APP_VERSION=1.0.0`.
 Ran:
 
 ```bash
-dotnet list package --vulnerable --include-transitive ```
+dotnet list package --vulnerable --include-transitive
 
 ### Notes / Issues Encountered
 
