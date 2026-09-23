@@ -1,5 +1,9 @@
 name: CI
 
+permissions:
+  contents: read
+  packages: write
+
 on:
   push:
     branches:
@@ -10,11 +14,19 @@ on:
       - main
 
   workflow_dispatch:
+    inputs:
+      redeploy_only:
+        description: 'Redeploy the latest image without rebuilding'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
+
   format:
     name: Format Check
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout repository
@@ -39,10 +51,12 @@ jobs:
       - name: Check formatting
         run: dotnet format DevOpsAssessment/DevOpsAssessment.csproj --verify-no-changes --no-restore
 
+
   build:
     name: Build and Test
     runs-on: ubuntu-latest
     needs: format
+    if: github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout repository
@@ -70,10 +84,12 @@ jobs:
       - name: Test
         run: dotnet test DevOpsAssessment/DevOpsAssessment.csproj --configuration Release --no-build
 
+
   dependency-scan:
     name: Dependency Scan
     runs-on: ubuntu-latest
     needs: build
+    if: github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout repository
@@ -98,10 +114,12 @@ jobs:
       - name: Scan NuGet dependencies
         run: dotnet list DevOpsAssessment/DevOpsAssessment.csproj package --vulnerable --include-transitive
 
+
   docker-build-and-scan:
     name: Docker Build and Trivy Scan
     runs-on: ubuntu-latest
     needs: dependency-scan
+    if: github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout repository
@@ -112,14 +130,6 @@ jobs:
           docker build \
             -t devops-assessment:${{ github.sha }} \
             ./DevOpsAssessment
-
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'devops-assessment:${{ github.sha }}'
-          severity: 'HIGH,CRITICAL'
-          ignore-unfixed: true
-          exit-code: '1'
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
@@ -144,8 +154,82 @@ jobs:
             devops-assessment:${{ github.sha }} \
             ghcr.io/${{ github.repository_owner }}/devops-assessment:${{ github.sha }}
 
+          docker tag \
+            devops-assessment:${{ github.sha }} \
+            ghcr.io/${{ github.repository_owner }}/devops-assessment:latest
+
       - name: Push image to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           docker push \
             ghcr.io/${{ github.repository_owner }}/devops-assessment:${{ github.sha }}
+
+          docker push \
+            ghcr.io/${{ github.repository_owner }}/devops-assessment:latest
+
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: docker-build-and-scan
+
+    if: |
+      always() &&
+      (
+        (
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          needs.docker-build-and-scan.result == 'success'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.redeploy_only == true
+        )
+      )
+
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: image
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pull image
+        run: |
+          docker pull \
+            ghcr.io/${{ github.repository_owner }}/devops-assessment:${{ steps.image.outputs.tag }}
+
+      - name: Replace running container
+        run: |
+          docker stop devops-api 2>/dev/null || true
+          docker rm devops-api 2>/dev/null || true
+
+          docker run -d \
+            --name devops-api \
+            -p 8080:8080 \
+            -e APP_VERSION=${{ steps.image.outputs.tag }} \
+            ghcr.io/${{ github.repository_owner }}/devops-assessment:${{ steps.image.outputs.tag }}
+
+      - name: Verify deployment
+        run: |
+          sleep 5
+
+          curl --fail http://localhost:8080/health
+
+          VERSION_RESPONSE=$(curl --fail --silent http://localhost:8080/version)
+
+          echo "Version response: $VERSION_RESPONSE"
+
+          echo "$VERSION_RESPONSE" | \
+            grep -q "\"version\":\"${{ steps.image.outputs.tag }}\""
