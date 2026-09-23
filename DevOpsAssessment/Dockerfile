@@ -35,3 +35,9 @@ HEALTHCHECK --interval=30s --timeout=3s \
     CMD curl -f http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["dotnet", "DevOpsAssessment.dll"]
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+
+WORKDIR /app
+
+LABEL org.opencontainers.image.source="https://github.com/juanchareun/devops-assessment"
