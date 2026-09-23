@@ -1,95 +1,91 @@
 # CI/CD Pipeline
 
 ```mermaid
-flowchart TD
+flowchart TB
 
-    A[Push or Pull Request to main] --> B[Format Check]
+    %% ---------- TRIGGERS ----------
+    subgraph TRIGGERS["Triggers"]
+        direction LR
+        PUSH["Push to main"]
+        PR["Pull Request"]
+        MANUAL["Manual workflow_dispatch"]
+    end
 
-    B --> C[Build and Test]
-    C --> D[Dependency Scan<br/>Report]
-    D --> E[Docker Build]
-    E --> F{Trivy Security Gate}
+    %% ---------- CI ----------
+    subgraph CI["Continuous Integration"]
+        direction LR
+        FORMAT["Format Check"]
+        BUILD["Build & Test"]
+        DEPS["Dependency Scan"]
+        DOCKER["Docker Build"]
+        TRIVY{"Trivy Gate"}
+    end
 
-    F -->|HIGH or CRITICAL found| X[Pipeline Stops]
-    F -->|Pass| G{Main branch push?}
+    %% ---------- REGISTRY ----------
+    subgraph REGISTRY["Container Registry"]
+        direction LR
+        TAG["Tag Image<br/>SHA + latest"]
+        GHCR["Push to GHCR"]
+    end
 
-    G -->|No - Pull Request| Y[Pipeline Complete]
-    G -->|Yes| H[Login to GHCR]
+    %% ---------- DEPLOYMENT ----------
+    subgraph DEPLOY["Deployment"]
+        direction LR
+        PULL["Pull Image"]
+        REPLACE["Replace Container"]
+        HEALTH["Health Check"]
+        VERSION["Verify /version"]
+    end
 
-    H --> I[Tag Image<br/>SHA + latest]
-    I --> J[Push Image to GHCR]
-    J --> K[Deploy]
+    %% ---------- MANUAL REDEPLOY ----------
+    subgraph REDEPLOY["Manual Redeploy"]
+        direction LR
+        FLAG["redeploy_only = true"]
+        SKIP["Skip CI Jobs"]
+        LATEST["Pull latest"]
+    end
 
-    K --> L[Pull Image]
-    L --> M[Stop and Remove Existing Container]
-    M --> N[Run New Container]
-    N --> O[Health Verification]
-    O --> P[Verify /version]
+    %% ---------- FAILURE ----------
+    STOP["Pipeline Stops"]
 
-    Q[Manual workflow_dispatch<br/>redeploy_only = true] --> R[Skip Build and Scan Jobs]
-    R --> S[Pull latest Image from GHCR]
-    S --> K
+    %% ---------- MAIN FLOW ----------
+    PUSH --> FORMAT
+    PR --> FORMAT
 
-    classDef gate stroke-width:3px;
-    class F gate;
+    FORMAT --> BUILD
+    BUILD --> DEPS
+    DEPS --> DOCKER
+    DOCKER --> TRIVY
+
+    TRIVY -->|Fail| STOP
+    TRIVY -->|Pass| TAG
+
+    TAG --> GHCR
+    GHCR --> PULL
+    PULL --> REPLACE
+    REPLACE --> HEALTH
+    HEALTH --> VERSION
+
+    %% ---------- MANUAL FLOW ----------
+    MANUAL --> FLAG
+    FLAG --> SKIP
+    SKIP --> LATEST
+    LATEST --> PULL
+
+    %% ---------- STYLES ----------
+    classDef trigger fill:#111827,stroke:#4b5563,color:#f9fafb,stroke-width:1.5px;
+    classDef ci fill:#172554,stroke:#3b82f6,color:#eff6ff,stroke-width:1.5px;
+    classDef gate fill:#431407,stroke:#f97316,color:#fff7ed,stroke-width:2px;
+    classDef registry fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff,stroke-width:1.5px;
+    classDef deploy fill:#064e3b,stroke:#34d399,color:#ecfdf5,stroke-width:1.5px;
+    classDef manual fill:#312e81,stroke:#818cf8,color:#eef2ff,stroke-width:1.5px;
+    classDef fail fill:#7f1d1d,stroke:#ef4444,color:#fef2f2,stroke-width:2px;
+
+    class PUSH,PR,MANUAL trigger;
+    class FORMAT,BUILD,DEPS,DOCKER ci;
+    class TRIVY gate;
+    class TAG,GHCR registry;
+    class PULL,REPLACE,HEALTH,VERSION deploy;
+    class FLAG,SKIP,LATEST manual;
+    class STOP fail;
 ```
-
-## Job Dependencies
-
-The GitHub Actions jobs use `needs:` to enforce this order:
-
-```text
-format
-  ↓
-build
-  ↓
-dependency-scan
-  ↓
-docker-build-and-scan
-  ↓
-deploy
-```
-
-If an upstream gate fails, the dependent jobs do not continue.
-
-## Security Gates
-
-- Formatting must pass before build/test.
-- Build/test must pass before dependency scanning.
-- Trivy scans the final container image for `HIGH` and `CRITICAL` vulnerabilities.
-- Trivy uses `exit-code: 1`, so detected vulnerabilities fail the pipeline.
-- Deployment only occurs after the required gates succeed.
-
-## Reporting vs Gating
-
-The NuGet dependency scan is primarily used as a dependency vulnerability report.
-
-The Trivy image scan is the enforced security gate before publishing and deployment.
-
-## Deployment Behavior
-
-On a successful push to `main`:
-
-```text
-Build image
-→ Scan image
-→ Push SHA-tagged image to GHCR
-→ Push latest tag to GHCR
-→ Pull image
-→ Replace running container
-→ Verify /health
-→ Verify /version
-```
-
-For a manual redeployment:
-
-```text
-workflow_dispatch
-→ redeploy_only = true
-→ Build jobs skipped
-→ Pull latest image
-→ Replace container
-→ Verify deployment
-```
-
-This allows the last successfully published image to be redeployed without creating a new commit or rebuilding the application.
