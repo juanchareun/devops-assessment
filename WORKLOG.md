@@ -490,6 +490,16 @@ Things like replicas, load balancing, failover, and rolling deployments belong i
 
 ---
 
+## Security gate validation
+
+I tested the Trivy gate on a separate branch by adding `Newtonsoft.Json 9.0.1` again and opening a pull request.
+
+The Docker build completed, but the Trivy scan found `CVE-2024-21907` as HIGH severity and exited with code 1.
+
+Because the scan failed, the later GHCR publishing steps did not run.
+
+This confirmed that the security gate actually stops the pipeline when a HIGH severity vulnerability is present.
+
 # Result
 
 The final pipeline successfully:
