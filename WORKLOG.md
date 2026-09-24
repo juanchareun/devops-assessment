@@ -2,172 +2,119 @@
 
 ## Environment
 
-Environment used for the assessment:
+I used an Ubuntu VM for the assessment.
 
-- Ubuntu Linux VM
+Tools:
+
 - .NET 8 SDK
 - Docker
 - Trivy
-- Git
-- GitHub
-- GitHub Container Registry (GHCR)
+- Git/GitHub
+- GitHub Container Registry
 
 ---
 
-# Part 1 — Scaffold a Real Service
+# Part 1 — Scaffold a real service
 
-Created an ASP.NET Core Web API using .NET 8.
-
-The service contains two endpoints:
+Created an ASP.NET Core Web API with:
 
 - `GET /health`
 - `GET /version`
 
-`/health` returns HTTP 200 with a small JSON response.
+`/health` returns a small JSON response and HTTP 200.
 
-`/version` reads the `APP_VERSION` environment variable and defaults to `dev` if the variable is not set.
+`/version` reads `APP_VERSION` and defaults to `dev`.
 
-### Local Testing
-
-Started the service locally with:
+Tested locally with:
 
 ```bash
 dotnet run
-```
-
-Verified the health endpoint:
-
-```bash
 curl http://localhost:5205/health
-```
-
-Verified the default version:
-
-```bash
 curl http://localhost:5205/version
 ```
 
-The response returned:
-
-```text
-dev
-```
-
-Then started the application with an environment variable:
+I also tested the environment variable override:
 
 ```bash
 APP_VERSION=1.0.0 dotnet run
 ```
 
-Verified `/version` again and confirmed it returned:
-
-```text
-1.0.0
-```
-
-This confirmed that both endpoints worked and that `APP_VERSION` could override the default value.
+`/version` returned `1.0.0`, so the override was working.
 
 ---
 
-# Part 2 — Vulnerability Scanning
+# Part 2 — Vulnerability scanning
 
-## Dependency Baseline
+## Dependency scan
 
-First ran:
+Started with:
 
 ```bash
 dotnet list package --vulnerable --include-transitive
 ```
 
-No vulnerable packages were initially reported.
-
-## Deliberately Vulnerable Dependency
-
-Added an intentionally vulnerable version of Newtonsoft.Json:
+Then added the intentionally vulnerable package:
 
 ```bash
 dotnet add package Newtonsoft.Json --version 9.0.1
 ```
 
-Ran the dependency scan again:
+Running the scan again showed a HIGH severity vulnerability in Newtonsoft.Json.
 
-```bash
-dotnet list package --vulnerable --include-transitive
-```
-
-The scan reported a HIGH severity vulnerability in Newtonsoft.Json.
-
-The vulnerable version was:
+The finding was:
 
 ```text
 Newtonsoft.Json 9.0.1
-```
-
-The finding included:
-
-```text
 CVE-2024-21907
+Fixed in 13.0.1
 ```
 
-## Dockerfile
+## Docker image
 
-Created a multi-stage Dockerfile using:
+Created a multi-stage Dockerfile with:
 
-- .NET 8 SDK as the build stage
-- ASP.NET 8 runtime as the final stage
-- Release publishing
-- framework-dependent deployment
-- a non-root `appuser`
-- port `8080`
-- Docker `HEALTHCHECK`
+- .NET 8 SDK build stage
+- ASP.NET 8 runtime stage
+- Release publish
+- non-root `appuser`
+- port 8080
+- health check against `/health`
 
-The application is copied from the build stage into the smaller runtime image.
+### Issue: Microsoft Container Registry was blocked
 
-The final container runs as:
-
-```text
-appuser
-```
-
-instead of root.
-
-## Docker Registry Issue
-
-The first Docker build failed while trying to pull images from:
+The first Docker build failed while pulling from:
 
 ```text
 mcr.microsoft.com
 ```
 
-Testing the registry endpoint with:
+I tested the registry directly:
 
 ```bash
 curl -i https://mcr.microsoft.com/v2/
 ```
 
-returned an HTML ThreatLocker Web Control block page instead of container registry data.
+Instead of registry data, the response was a ThreatLocker Web Control block page.
 
-Pulling another public image such as:
+I also tested Docker Hub:
 
 ```bash
 docker pull ubuntu:24.04
 ```
 
-worked correctly.
+That worked, which narrowed the problem down to access to MCR rather than Docker itself.
 
-This showed that Docker itself was functioning and that the issue was specific to access to Microsoft Container Registry.
+After removing the blocking control, the .NET images could be pulled normally.
 
-After the blocking control was removed, Docker was able to pull the required .NET images.
-
-Docker temporarily returned:
+Docker briefly started returning:
 
 ```text
 Operation not permitted
 ```
 
-after the security control was removed. Rebooting the VM restored normal Docker execution.
+after the security control was removed. Rebooting the VM cleared that issue.
 
-## Vulnerable Image Scan
+## Trivy scan
 
 Built the vulnerable image:
 
@@ -175,78 +122,65 @@ Built the vulnerable image:
 docker build -t devops-assessment:1.0.0 .
 ```
 
-Scanned it with:
+Then scanned it:
 
 ```bash
 trivy image devops-assessment:1.0.0
 ```
 
-Trivy reported both operating-system vulnerabilities and the application dependency vulnerability.
+Trivy showed OS findings as well as the Newtonsoft.Json vulnerability.
 
-The application-level finding included:
-
-```text
-Newtonsoft.Json 9.0.1
-CVE-2024-21907
-Severity: HIGH
-Fixed version: 13.0.1
-```
-
-## Remediation
-
-Updated Newtonsoft.Json:
+I updated the package:
 
 ```bash
 dotnet add package Newtonsoft.Json --version 13.0.1
 ```
 
-Ran the dependency scan again:
+The NuGet vulnerability scan was clean after the update.
+
+I rebuilt the image and verified:
 
 ```bash
-dotnet list package --vulnerable --include-transitive
-```
-
-No vulnerable NuGet packages were reported.
-
-Built the corrected image:
-
-```bash
-docker build -t devops-assessment:1.0.2 .
-```
-
-Verified:
-
-- `/health` worked
-- `/version` worked
-- the container ran as `appuser`
-- Docker reported the container as healthy
-
-Verified the container user with:
-
-```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/version
 docker exec devops-api whoami
 ```
 
-Result:
+`whoami` returned:
 
 ```text
 appuser
 ```
 
-## Container Name Conflict
+## Why do we care if the container runs as root, and what did you have to change to make `USER appuser` actually work?
 
-During local testing, an existing `devops-api` container caused a Docker name collision.
+Running the application as root gives it more privileges than it needs.
 
-Resolved it with:
+If the application was compromised, running as a non-root user would limit what that process could do inside the container.
+
+To make `appuser` work, I created the user in the runtime stage and copied the published files with the correct ownership:
+
+```dockerfile
+COPY --from=build --chown=appuser:appuser /app/publish ./
+USER appuser
+```
+
+That let the application run normally without root.
+
+## Container name conflict
+
+While testing locally, I hit a container name collision because `devops-api` already existed.
+
+I fixed it with:
 
 ```bash
 docker stop devops-api 2>/dev/null || true
 docker rm devops-api 2>/dev/null || true
 ```
 
-This same pattern was later used in the deployment workflow to make replacement of the container idempotent.
+I reused the same pattern later in the deploy job.
 
-## Final Trivy Gate
+## Final gate
 
 Ran:
 
@@ -258,27 +192,12 @@ trivy image \
   devops-assessment:1.0.2
 ```
 
-Final result:
+Final filtered result:
 
 ```text
 HIGH: 0
 CRITICAL: 0
 ```
-
-## Why Run the Container as Non-Root?
-
-Running the application as a non-root user reduces the impact of a container compromise.
-
-If the application is exploited while running as root, the attacker has root privileges inside the container. Running as `appuser` limits those privileges and reduces the available attack surface.
-
-To make this work, I created the user in the runtime stage and copied the published application files with ownership assigned to that user:
-
-```dockerfile
-COPY --from=build --chown=appuser:appuser /app/publish ./
-USER appuser
-```
-
-This ensured the application files could be accessed by the non-root user.
 
 ---
 
@@ -290,150 +209,106 @@ Created one workflow:
 .github/workflows/ci.yml
 ```
 
-The workflow is triggered by:
+It runs on:
 
-- pushes to `main`
-- pull requests targeting `main`
+- push to `main`
+- pull request to `main`
 - manual `workflow_dispatch`
 
-## Pipeline Order
+I split the workflow into separate jobs so each stage has its own status and I can control the order with `needs:`.
 
-The main pipeline follows:
+The main flow is:
 
 ```text
-Format Check
-→ Build and Test
+Format
+→ Build/Test
 → Dependency Scan
-→ Docker Build and Trivy Scan
+→ Docker Build + Trivy
 → Push to GHCR
 → Deploy
-→ Verify
 ```
 
-Separate jobs were used because they provide clearer visibility into which stage failed and allow explicit dependencies through `needs:`.
+## Format
 
-## Format Check
-
-The first job restores the project and runs:
+The first job runs:
 
 ```bash
-dotnet format DevOpsAssessment/DevOpsAssessment.csproj \
-  --verify-no-changes \
-  --no-restore
+dotnet format DevOpsAssessment/DevOpsAssessment.csproj --verify-no-changes --no-restore
 ```
 
-An `.editorconfig` file was added to define formatting rules.
+I added an `.editorconfig` to keep formatting consistent.
 
-Initially the format check detected CRLF line endings in `Program.cs`.
+The first format run found line-ending differences in `Program.cs`.
 
-Running:
+I ran `dotnet format`, committed the result, and the check passed afterward.
+
+## Build/Test
+
+The build job depends on the format job.
+
+It restores, builds in Release, then runs:
 
 ```bash
-dotnet format DevOpsAssessment/DevOpsAssessment.csproj
+dotnet test
 ```
 
-corrected the formatting and allowed the check to pass.
+## Dependency scan
 
-## Build and Test
+The next job runs:
 
-The next job depends on the format job using:
+```bash
+dotnet list DevOpsAssessment/DevOpsAssessment.csproj package --vulnerable --include-transitive
+```
+
+I treat this mainly as a report step.
+
+## Caching
+
+I added NuGet caching using:
 
 ```yaml
-needs: format
+actions/cache@v4
 ```
 
-It performs:
+with the project files included in the cache key.
 
-```bash
-dotnet restore
-dotnet build --configuration Release --no-restore
-dotnet test --configuration Release --no-build
-```
+## Docker build and Trivy gate
 
-## Dependency Scan
+The Docker image is built using the Git commit SHA as the tag.
 
-The dependency scan runs after build/test.
-
-It uses:
-
-```bash
-dotnet list DevOpsAssessment/DevOpsAssessment.csproj \
-  package \
-  --vulnerable \
-  --include-transitive
-```
-
-This is primarily used as a dependency vulnerability report.
-
-## NuGet Caching
-
-NuGet packages are cached with:
-
-```yaml
-uses: actions/cache@v4
-```
-
-The cache key is based on:
-
-```text
-hashFiles('**/*.csproj')
-```
-
-This avoids downloading unchanged NuGet packages repeatedly across workflow runs.
-
-## Docker Build and Trivy Gate
-
-The workflow builds the Docker image using the Git commit SHA as the image tag.
-
-Example:
-
-```text
-devops-assessment:${{ github.sha }}
-```
-
-The image is then scanned using Trivy for:
+Trivy scans the image for:
 
 ```text
 HIGH
 CRITICAL
 ```
 
-The Trivy step uses:
+and uses:
 
 ```text
 exit-code: 1
 ```
 
-which makes the workflow fail if a matching vulnerability is detected.
+so the workflow stops if the gate fails.
 
-This is the main security gate before publishing the image.
+## GHCR
 
-## GHCR Publishing
+Images are only pushed on `main`.
 
-After the security scan passes on a push to `main`, the workflow authenticates to GitHub Container Registry using:
+The workflow tags the image with:
 
-```text
-GITHUB_TOKEN
-```
-
-The image is tagged with:
-
-- the Git commit SHA
+- the commit SHA
 - `latest`
 
-and pushed to:
+### Issue: first GHCR push failed
 
-```text
-ghcr.io/juanchareun/devops-assessment
-```
-
-The first GHCR push failed with:
+The initial push failed with:
 
 ```text
 denied: installation not allowed to Create organization package
 ```
 
-The workflow permissions were changed to allow package writes:
+I changed the workflow permissions to:
 
 ```yaml
 permissions:
@@ -441,249 +316,189 @@ permissions:
   packages: write
 ```
 
-The Docker image was also given the OCI source label:
+I also added the repository source label to the Dockerfile.
 
-```dockerfile
-LABEL org.opencontainers.image.source="https://github.com/juanchareun/devops-assessment"
-```
+After that, the image pushed successfully.
 
-After these changes, the image published successfully.
+## Manual redeploy
 
-## Manual Redeployment
-
-The workflow includes:
-
-```yaml
-workflow_dispatch:
-```
-
-with a `redeploy_only` input.
-
-When:
+I added a `workflow_dispatch` input called:
 
 ```text
-redeploy_only = true
+redeploy_only
 ```
 
-the build, dependency scan, and image build jobs are skipped.
+When that is set to `true`, the CI/build jobs are skipped and the deploy job pulls the last published `latest` image.
 
-The deploy job pulls the previously published:
+I tested this manually from the Actions tab and it completed successfully.
 
-```text
-latest
-```
+## Why `needs:` matters
 
-image and redeploys it.
+The jobs are chained with `needs:` so a failed required stage prevents the later jobs from running.
 
-This was tested successfully from the GitHub Actions interface.
-
-## `needs:` and Pipeline Gating
-
-The workflow uses job dependencies similar to:
-
-```text
-format
-  ↓
-build
-  ↓
-dependency-scan
-  ↓
-docker-build-and-scan
-  ↓
-deploy
-```
-
-Using `needs:` ensures downstream stages do not proceed if an earlier required job fails.
+That is especially important before image publishing and deployment.
 
 ---
 
-# Workflow Diagram
+# Workflow diagram
 
-A Mermaid pipeline diagram was added to:
+The pipeline diagram is in:
 
 ```text
 PIPELINE.md
 ```
 
-The diagram shows:
-
-- workflow triggers
-- jobs
-- `needs:` relationships
-- security gates
-- reporting stages
-- GHCR publishing
-- deployment
-- manual redeployment
+It shows the triggers, job dependencies, Trivy gate, GHCR publishing, deployment path, and manual redeploy path.
 
 ---
 
-# Part 4 — Deploy Step
+# Part 4 — Deploy step
 
-The deploy job runs after the Docker build and security gate succeeds on `main`.
+The deploy job runs on the GitHub-hosted Actions runner.
 
-The deployment process is:
+It:
 
-```text
-Pull image from GHCR
-→ Stop old container
-→ Remove old container
-→ Start new container
-→ Verify /health
-→ Verify /version
-```
+1. Logs in to GHCR
+2. Pulls the image
+3. Stops/removes the existing container
+4. Starts the new container
+5. Checks `/health`
+6. Checks `/version`
 
-## Container Replacement
+The container is started with `APP_VERSION` set to the deployed image tag.
 
-Before starting the replacement container, the workflow runs:
+## Issue: container immediately exited
 
-```bash
-docker stop devops-api 2>/dev/null || true
-docker rm devops-api 2>/dev/null || true
-```
+The first deployment created the container, but it exited immediately.
 
-This makes repeated deployments safe even if the previous container exists.
-
-The new container is started with:
-
-```bash
-docker run -d \
-  --name devops-api \
-  -p 8080:8080 \
-  -e APP_VERSION=<image-tag> \
-  <GHCR-image>
-```
-
-## Deployment Failure — Incorrect Final Docker Stage
-
-During the first deployment test, the container was created successfully but immediately exited.
-
-The GitHub Actions log showed the container command as:
+The Actions output showed the command as:
 
 ```text
 bash
 ```
 
-instead of:
+instead of the application entrypoint.
 
-```text
-dotnet DevOpsAssessment.dll
-```
-
-Inspection of the Dockerfile showed that an additional:
+I checked the Dockerfile and found that I had accidentally added another:
 
 ```dockerfile
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 ```
 
-had accidentally been added after:
+after the real runtime stage.
 
-```dockerfile
-ENTRYPOINT ["dotnet", "DevOpsAssessment.dll"]
-```
+Because Docker uses the last stage as the final image, I was publishing an empty runtime image instead of the application image.
 
-Because Docker uses the final stage as the resulting image, the pushed image contained an empty ASP.NET runtime stage instead of the actual application.
+I removed the duplicate stage and rebuilt.
 
-The duplicate `FROM` was removed and the OCI source label was moved into the correct runtime stage.
+The next deployment started correctly.
 
-After rebuilding, the container started correctly.
+## Readiness check
 
-## Deployment Readiness Check
+My first version just waited five seconds before calling `/health`.
 
-The first verification used a fixed:
+That worked poorly because it assumed the application would always start within that exact time.
 
-```bash
-sleep 5
-```
+I changed it to retry `/health` for up to 60 seconds.
 
-before calling the application.
-
-This was replaced with a readiness loop that repeatedly checks:
-
-```text
-/health
-```
-
-before checking the version endpoint.
-
-If the service never becomes ready, the workflow prints:
+If the application never becomes ready, the workflow prints:
 
 ```bash
 docker ps -a
 docker logs devops-api
 ```
 
-and fails the deployment.
+before failing.
 
-This provides better diagnostics than relying on a fixed delay.
+## Deployment risk
 
-## Version Verification
+### What's the actual risk of `docker run` with no restart policy and no health-based rollback, and what's the smallest change that reduces it?
 
-After the container becomes healthy, the workflow requests:
+The main risk is that if the container crashes or the host restarts, the application may stay down.
 
-```text
-/version
-```
+There is also no automatic rollback if a bad image starts successfully but later becomes unhealthy.
 
-and confirms the returned version matches the image tag used for the deployment.
-
-The final deployment workflow completed successfully.
-
-The manual `workflow_dispatch` redeployment also completed successfully.
-
-## Deployment Risk
-
-The current deployment runs one container directly using `docker run`.
-
-There is no automatic rollback if a newly deployed container becomes unhealthy after deployment, and there is currently no Docker restart policy.
-
-A small improvement would be:
+The smallest improvement I would make is:
 
 ```bash
 --restart unless-stopped
 ```
 
-This would allow Docker to restart the service automatically after a process failure or host reboot.
+That would at least restart the container after a crash or host reboot.
 
-A more complete solution would require health-aware deployment and rollback logic or a container orchestrator.
+It would not solve health-based rollback, but it is a simple improvement over the current setup.
 
 ---
 
-# Part 5 — Written Section
+# Part 5 — Written section
 
-## 1. Would I Run Format, Test, and Security Scans in Parallel?
+## Format check, test, security scan — if all three could run in parallel instead of sequentially, would you? What do you gain, what do you risk?
 
+I probably wouldn't run everything in parallel by default.
 
-## 2. Where Do Secrets Live and What Is the Blast Radius?
+The main benefit would be speed. If format, tests, and security checks all started at the same time, I would get feedback faster.
 
+The downside is that I could end up running jobs that were never needed. For example, if the formatting check fails immediately, there is not much value in continuing to spend time and runner resources on later stages.
 
+For this project I preferred keeping the flow sequential because it makes it very clear where the pipeline failed and why the next stage did not run.
 
-## 3. What Is the Gap With `--ignore-unfixed`?
+---
 
+## Where do secrets live in your pipeline? What's the blast radius if one leaks into a log line?
 
+I do not keep secrets directly in the repository or inside the workflow file.
 
-## 4. What Changes for Three Replicas Behind a Load Balancer?
+For GHCR, I am using GitHub's `GITHUB_TOKEN`, which GitHub provides to the workflow automatically.
 
+If I needed another credential, I would store it in GitHub Actions Secrets rather than putting it in the YAML.
 
+If a secret did get exposed in a log, how bad it is would depend on what that secret is allowed to do.
 
-# Final Result
+For example, if someone got a token that could write to GHCR, they could potentially push or replace container images.
 
-The completed project includes:
+---
 
-- ASP.NET Core Web API
-- `/health` endpoint
-- `/version` endpoint
-- multi-stage Dockerfile
-- non-root container execution
-- Docker health check
-- dependency vulnerability scanning
-- Trivy image security gate
-- GitHub Actions CI/CD workflow
-- NuGet caching
-- GHCR publishing
-- main-only deployment
-- manual redeployment with `workflow_dispatch`
-- deployment health and version verification
-- Mermaid pipeline diagram
+## Your Trivy gate uses `--ignore-unfixed`. A base-image CVE that had no fix gets one next month. Nothing in your pipeline catches that automatically. What's the gap, how do you close it?
 
-The final CI/CD pipeline and manual redeployment both completed successfully.
+The gap is that my pipeline mainly runs when I make a change.
+
+If a vulnerability has no fix today, Trivy ignores it because of `--ignore-unfixed`.
+
+If a fix becomes available next month but I have not changed the project, nothing automatically causes that image to be scanned again.
+
+The simplest way I would improve that is by adding a scheduled workflow that runs Trivy regularly, even when there has not been a new commit.
+
+I would also rebuild the image periodically so it picks up updates from the base image.
+
+That way I am not depending only on code changes to find newly fixable vulnerabilities.
+
+---
+
+## If this needed 3 replicas behind a load balancer instead of one `docker run`, what's the smallest realistic next step — and what would you explicitly not try to solve with a Dockerfile change alone?
+
+At that point I would move it to something that can actually manage multiple containers.
+
+The next realistic step would be something like Kubernetes.
+
+I would want the platform to handle things like keeping three instances running, checking whether they are healthy, replacing failed containers, and sending traffic between them.
+
+I would not try to solve that inside the Dockerfile.
+
+The Dockerfile should describe how to build and run one copy of the application.
+
+Things like replicas, load balancing, failover, and rolling deployments belong in the deployment platform instead.
+
+---
+
+# Result
+
+The final pipeline successfully:
+
+- formats and builds the project
+- runs the dependency report
+- builds the container
+- blocks on HIGH/CRITICAL Trivy findings
+- pushes images to GHCR
+- deploys on `main`
+- verifies `/health` and `/version`
+- supports manual redeployment without another build
